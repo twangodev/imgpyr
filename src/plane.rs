@@ -1,4 +1,5 @@
 /// A single-channel image: row-major `f32` samples carried with their dimensions.
+#[derive(Clone)]
 pub struct Plane {
     data: Vec<f32>,
     width: usize,
@@ -36,6 +37,10 @@ impl Plane {
 
     pub fn as_slice(&self) -> &[f32] {
         &self.data
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        &mut self.data
     }
 
     pub fn sample(&self, x: usize, y: usize) -> f32 {
