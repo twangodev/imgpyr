@@ -9,3 +9,6 @@ keywords = ["image", "pyramid", "laplacian", "gaussian", "blending"]
 categories = ["multimedia::images"]
 
 [dependencies]
+
+[dev-dependencies]
+proptest = "1.11.0"
