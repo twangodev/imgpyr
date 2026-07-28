@@ -7,17 +7,110 @@ const KERNEL_SUM: f32 = KERNEL[0] + KERNEL[1] + KERNEL[2] + KERNEL[3] + KERNEL[4
 
 const RADIUS: isize = (KERNEL.len() / 2) as isize;
 
-/// Blurs and halves a plane, rounding each dimension up.
-pub fn reduce(src: &Plane, border: Border) -> Plane {
-    let width = src.width().div_ceil(2);
-    let height = src.height().div_ceil(2);
-    let mut samples = Vec::with_capacity(width * height);
+/// Which source sample a kernel tap reads, or `None` where it reads a position
+/// that only exists because upsampling invented it.
+type Tap = fn(usize, usize, usize, Border) -> Option<usize>;
+
+fn decimating(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
+    Some(border.resolve(
+        2 * destination as isize + tap as isize - RADIUS,
+        len,
+    ))
+}
+
+fn interpolating(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
+    let coordinate = destination as isize + tap as isize - RADIUS;
+    (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate.div_euclid(2), len))
+}
+
+/// The kernel is an outer product, so a 2D pass factors into one pass per axis:
+/// 10 multiplies per sample instead of 25.
+fn weighted(
+    samples: &[f32],
+    stride: usize,
+    len: usize,
+    destination: usize,
+    tap: Tap,
+    gain: f32,
+    border: Border,
+) -> f32 {
+    let mut total = 0.0;
+
+    for (index, &weight) in KERNEL.iter().enumerate() {
+        if let Some(source) = tap(destination, index, len, border) {
+            total += weight * samples[source * stride];
+        }
+    }
+
+    total * gain / KERNEL_SUM
+}
+
+fn across(
+    src: &[f32],
+    src_width: usize,
+    height: usize,
+    width: usize,
+    tap: Tap,
+    gain: f32,
+    border: Border,
+) -> Vec<f32> {
+    let mut resampled = Vec::with_capacity(width * height);
+
+    for y in 0..height {
+        let row = &src[y * src_width..(y + 1) * src_width];
+        for x in 0..width {
+            resampled.push(weighted(row, 1, src_width, x, tap, gain, border));
+        }
+    }
+
+    resampled
+}
+
+fn down(
+    src: &[f32],
+    width: usize,
+    src_height: usize,
+    height: usize,
+    tap: Tap,
+    gain: f32,
+    border: Border,
+) -> Vec<f32> {
+    let mut resampled = vec![0.0; width * height];
 
     for y in 0..height {
         for x in 0..width {
-            samples.push(weighted_sum_around(src, 2 * x, 2 * y, border));
+            resampled[y * width + x] =
+                weighted(&src[x..], width, src_height, y, tap, gain, border);
         }
     }
+
+    resampled
+}
+
+/// Blurs and halves a plane, rounding each dimension up.
+pub fn reduce(src: &Plane, border: Border) -> Plane {
+    const GAIN: f32 = 1.0;
+    let width = src.width().div_ceil(2);
+    let height = src.height().div_ceil(2);
+
+    let columns = across(
+        src.as_slice(),
+        src.width(),
+        src.height(),
+        width,
+        decimating,
+        GAIN,
+        border,
+    );
+    let samples = down(
+        &columns,
+        width,
+        src.height(),
+        height,
+        decimating,
+        GAIN,
+        border,
+    );
 
     Plane::from_vec(samples, width, height)
 }
@@ -37,64 +130,79 @@ pub fn expand(src: &Plane, width: usize, height: usize, border: Border) -> Plane
         src.height()
     );
 
-    let mut samples = Vec::with_capacity(width * height);
+    const GAIN: f32 = 2.0;
 
-    for y in 0..height {
-        for x in 0..width {
-            samples.push(interpolated_sum_at(src, x, y, border));
-        }
-    }
+    let columns = across(
+        src.as_slice(),
+        src.width(),
+        src.height(),
+        width,
+        interpolating,
+        GAIN,
+        border,
+    );
+    let samples = down(
+        &columns,
+        width,
+        src.height(),
+        height,
+        interpolating,
+        GAIN,
+        border,
+    );
 
     Plane::from_vec(samples, width, height)
-}
-
-/// Half the taps land on the zeros that upsampling inserts and contribute
-/// nothing; `GAIN` restores the energy they would have carried.
-fn interpolated_sum_at(src: &Plane, x: usize, y: usize, border: Border) -> f32 {
-    const GAIN: f32 = 2.0;
-    let mut total = 0.0;
-
-    for (row, &row_weight) in KERNEL.iter().enumerate() {
-        let Some(sy) = upsampled_source(y, row, src.height(), border) else {
-            continue;
-        };
-
-        for (column, &column_weight) in KERNEL.iter().enumerate() {
-            let Some(sx) = upsampled_source(x, column, src.width(), border) else {
-                continue;
-            };
-            total += row_weight * column_weight * src.sample(sx, sy);
-        }
-    }
-
-    total * (GAIN * GAIN) / (KERNEL_SUM * KERNEL_SUM)
-}
-
-/// `None` where the tap falls on an inserted zero.
-fn upsampled_source(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
-    let coordinate = destination as isize + tap as isize - RADIUS;
-    (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate.div_euclid(2), len))
-}
-
-fn weighted_sum_around(src: &Plane, cx: usize, cy: usize, border: Border) -> f32 {
-    let mut total = 0.0;
-
-    for (row, &row_weight) in KERNEL.iter().enumerate() {
-        let sy = border.resolve(cy as isize + row as isize - RADIUS, src.height());
-
-        for (column, &column_weight) in KERNEL.iter().enumerate() {
-            let sx = border.resolve(cx as isize + column as isize - RADIUS, src.width());
-            total += row_weight * column_weight * src.sample(sx, sy);
-        }
-    }
-
-    total / (KERNEL_SUM * KERNEL_SUM)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    // The unfactored 5x5 form, kept as an independent reference for the
+    // separable implementation to be checked against.
+    /// Half the taps land on the zeros that upsampling inserts and contribute
+    /// nothing; `GAIN` restores the energy they would have carried.
+    fn reference_expand_at(src: &Plane, x: usize, y: usize, border: Border) -> f32 {
+        const GAIN: f32 = 2.0;
+        let mut total = 0.0;
+
+        for (row, &row_weight) in KERNEL.iter().enumerate() {
+            let Some(sy) = reference_upsampled_source(y, row, src.height(), border) else {
+                continue;
+            };
+
+            for (column, &column_weight) in KERNEL.iter().enumerate() {
+                let Some(sx) = reference_upsampled_source(x, column, src.width(), border) else {
+                    continue;
+                };
+                total += row_weight * column_weight * src.sample(sx, sy);
+            }
+        }
+
+        total * (GAIN * GAIN) / (KERNEL_SUM * KERNEL_SUM)
+    }
+
+    /// `None` where the tap falls on an inserted zero.
+    fn reference_upsampled_source(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
+        let coordinate = destination as isize + tap as isize - RADIUS;
+        (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate.div_euclid(2), len))
+    }
+
+    fn reference_reduce_at(src: &Plane, cx: usize, cy: usize, border: Border) -> f32 {
+        let mut total = 0.0;
+
+        for (row, &row_weight) in KERNEL.iter().enumerate() {
+            let sy = border.resolve(cy as isize + row as isize - RADIUS, src.height());
+
+            for (column, &column_weight) in KERNEL.iter().enumerate() {
+                let sx = border.resolve(cx as isize + column as isize - RADIUS, src.width());
+                total += row_weight * column_weight * src.sample(sx, sy);
+            }
+        }
+
+        total / (KERNEL_SUM * KERNEL_SUM)
+    }
 
     const BORDERS: [Border; 2] = [Border::Replicate, Border::Mirror];
 
@@ -203,7 +311,54 @@ mod tests {
         }
     }
 
+    fn textured(width: usize, height: usize, seed: f32) -> Plane {
+        plane_from(width, height, |x, y| {
+            (x * 1.7 + seed).sin() * (y * 0.9 - seed).cos()
+        })
+    }
+
     proptest! {
+        /// Factoring the kernel into two passes must not change the answer.
+        #[test]
+        fn reduction_matches_the_unfactored_form(
+            width in 1usize..40,
+            height in 1usize..40,
+            seed in 0.0f32..10.0,
+        ) {
+            let source = textured(width, height, seed);
+
+            for border in BORDERS {
+                let separable = reduce(&source, border);
+
+                for y in 0..separable.height() {
+                    for x in 0..separable.width() {
+                        let expected = reference_reduce_at(&source, 2 * x, 2 * y, border);
+                        prop_assert!((separable.sample(x, y) - expected).abs() < 1e-5);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn expansion_matches_the_unfactored_form(
+            width in 1usize..60,
+            height in 1usize..60,
+            seed in 0.0f32..10.0,
+        ) {
+            let source = textured(width.div_ceil(2), height.div_ceil(2), seed);
+
+            for border in BORDERS {
+                let separable = expand(&source, width, height, border);
+
+                for y in 0..height {
+                    for x in 0..width {
+                        let expected = reference_expand_at(&source, x, y, border);
+                        prop_assert!((separable.sample(x, y) - expected).abs() < 1e-5);
+                    }
+                }
+            }
+        }
+
         #[test]
         fn any_constant_survives_expansion_at_any_size(
             width in 1usize..60,
