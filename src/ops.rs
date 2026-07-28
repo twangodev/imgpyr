@@ -54,14 +54,14 @@ fn across(
     gain: f32,
     border: Border,
 ) -> Vec<f32> {
-    let mut resampled = Vec::with_capacity(width * height);
+    let mut resampled = vec![0.0; width * height];
 
-    for y in 0..height {
-        let row = &src[y * src_width..(y + 1) * src_width];
-        for x in 0..width {
-            resampled.push(weighted(row, 1, src_width, x, tap, gain, border));
+    fill_rows(&mut resampled, width, |y, row| {
+        let source = &src[y * src_width..(y + 1) * src_width];
+        for (x, sample) in row.iter_mut().enumerate() {
+            *sample = weighted(source, 1, src_width, x, tap, gain, border);
         }
-    }
+    });
 
     resampled
 }
@@ -77,14 +77,32 @@ fn down(
 ) -> Vec<f32> {
     let mut resampled = vec![0.0; width * height];
 
-    for y in 0..height {
-        for x in 0..width {
-            resampled[y * width + x] =
-                weighted(&src[x..], width, src_height, y, tap, gain, border);
+    fill_rows(&mut resampled, width, |y, row| {
+        for (x, sample) in row.iter_mut().enumerate() {
+            *sample = weighted(&src[x..], width, src_height, y, tap, gain, border);
         }
-    }
+    });
 
     resampled
+}
+
+/// Every output row is independent of the others, which is the whole reason
+/// `rayon` can be dropped in without touching the arithmetic.
+fn fill_rows(buffer: &mut [f32], width: usize, fill: impl Fn(usize, &mut [f32]) + Send + Sync) {
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        buffer
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| fill(y, row));
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    buffer
+        .chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| fill(y, row));
 }
 
 /// Blurs and halves a plane, rounding each dimension up.
