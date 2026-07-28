@@ -5,6 +5,8 @@ const KERNEL: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
 
 const KERNEL_SUM: f32 = KERNEL[0] + KERNEL[1] + KERNEL[2] + KERNEL[3] + KERNEL[4];
 
+const RADIUS: isize = (KERNEL.len() / 2) as isize;
+
 /// Blurs and halves a plane, rounding each dimension up.
 pub fn reduce(src: &Plane, border: Border) -> Plane {
     let width = src.width().div_ceil(2);
@@ -20,8 +22,61 @@ pub fn reduce(src: &Plane, border: Border) -> Plane {
     Plane::from_vec(samples, width, height)
 }
 
+/// Doubles a plane onto an explicitly sized destination.
+///
+/// The size is given rather than derived because doubling is ambiguous: a
+/// 51-wide plane expands to either 101 or 102, and only the caller knows which
+/// one it was reduced from.
+///
+/// Panics unless `width` and `height` reduce back to the source dimensions.
+pub fn expand(src: &Plane, width: usize, height: usize, border: Border) -> Plane {
+    assert!(
+        width.div_ceil(2) == src.width() && height.div_ceil(2) == src.height(),
+        "{width}x{height} does not reduce to {}x{}",
+        src.width(),
+        src.height()
+    );
+
+    let mut samples = Vec::with_capacity(width * height);
+
+    for y in 0..height {
+        for x in 0..width {
+            samples.push(interpolated_sum_at(src, x, y, border));
+        }
+    }
+
+    Plane::from_vec(samples, width, height)
+}
+
+/// Half the taps land on the zeros that upsampling inserts and contribute
+/// nothing; `GAIN` restores the energy they would have carried.
+fn interpolated_sum_at(src: &Plane, x: usize, y: usize, border: Border) -> f32 {
+    const GAIN: f32 = 2.0;
+    let mut total = 0.0;
+
+    for (row, &row_weight) in KERNEL.iter().enumerate() {
+        let Some(sy) = upsampled_source(y, row, src.height(), border) else {
+            continue;
+        };
+
+        for (column, &column_weight) in KERNEL.iter().enumerate() {
+            let Some(sx) = upsampled_source(x, column, src.width(), border) else {
+                continue;
+            };
+            total += row_weight * column_weight * src.sample(sx, sy);
+        }
+    }
+
+    total * (GAIN * GAIN) / (KERNEL_SUM * KERNEL_SUM)
+}
+
+/// `None` where the tap falls on an inserted zero.
+fn upsampled_source(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
+    let coordinate = destination as isize + tap as isize - RADIUS;
+    (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate.div_euclid(2), len))
+}
+
 fn weighted_sum_around(src: &Plane, cx: usize, cy: usize, border: Border) -> f32 {
-    const RADIUS: isize = 2;
     let mut total = 0.0;
 
     for (row, &row_weight) in KERNEL.iter().enumerate() {
@@ -90,7 +145,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn expansion_fills_the_requested_size() {
+        let source = Plane::zeros(5, 4);
+
+        let even = expand(&source, 10, 8, Border::Mirror);
+        assert_eq!((even.width(), even.height()), (10, 8));
+
+        let odd = expand(&source, 9, 7, Border::Mirror);
+        assert_eq!((odd.width(), odd.height()), (9, 7));
+    }
+
+    #[test]
+    #[should_panic(expected = "9x7 does not reduce to 4x4")]
+    fn expansion_rejects_a_size_that_does_not_reduce_to_the_source() {
+        expand(&Plane::zeros(4, 4), 9, 7, Border::Mirror);
+    }
+
+    /// Catches the zero-insertion gain: without it a flat region loses three
+    /// quarters of its value.
+    #[test]
+    fn a_constant_plane_survives_expansion() {
+        for border in BORDERS {
+            for (width, height) in [(10, 8), (9, 7)] {
+                let expanded = expand(&plane_from(5, 4, |_, _| 0.5), width, height, border);
+
+                for (i, &sample) in expanded.as_slice().iter().enumerate() {
+                    assert!(
+                        (sample - 0.5).abs() < 1e-6,
+                        "{border:?} {width}x{height} drifted to {sample} at index {i}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Source sample `i` must land on destination `2i`, with odd destinations
+    /// interpolated halfway. A ramp is the only input that distinguishes the
+    /// even and odd tap sets, which carry different weights.
+    #[test]
+    fn expansion_interpolates_a_ramp() {
+        let ramp = |x: f32, y: f32| 0.1 + 0.03 * x + 0.07 * y;
+
+        for border in BORDERS {
+            let expanded = expand(&plane_from(5, 4, ramp), 10, 8, border);
+
+            for y in 2..expanded.height() - 2 {
+                for x in 2..expanded.width() - 2 {
+                    let expected = ramp(x as f32 / 2.0, y as f32 / 2.0);
+                    let actual = expanded.sample(x, y);
+                    assert!(
+                        (actual - expected).abs() < 1e-5,
+                        "{border:?} at ({x}, {y}): {actual} != {expected}"
+                    );
+                }
+            }
+        }
+    }
+
     proptest! {
+        #[test]
+        fn any_constant_survives_expansion_at_any_size(
+            width in 1usize..60,
+            height in 1usize..60,
+            value in -10.0f32..10.0,
+        ) {
+            let source = plane_from(width.div_ceil(2), height.div_ceil(2), |_, _| value);
+
+            for border in BORDERS {
+                for &sample in expand(&source, width, height, border).as_slice() {
+                    prop_assert!((sample - value).abs() < 1e-5);
+                }
+            }
+        }
+
         #[test]
         fn reduction_halves_each_dimension_rounding_up(
             width in 1usize..300,

@@ -5,5 +5,5 @@ mod ops;
 mod plane;
 
 pub use border::Border;
-pub use ops::reduce;
+pub use ops::{expand, reduce};
 pub use plane::Plane;
