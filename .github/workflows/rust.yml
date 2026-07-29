@@ -37,14 +37,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Both code paths get the same suite; the rayon feature changes how the
-      # row loops run, not what they compute.
       - run: cargo test --features "${{ matrix.features }}"
       - run: cargo build --examples --features "${{ matrix.features }}"
 
   fixtures:
-    # The oracle fixtures are committed, so nothing above needs OpenCV. This
-    # job proves they still match what OpenCV actually produces.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -75,8 +71,6 @@ jobs:
     if: needs.release-please.outputs.released == 'true'
     runs-on: ubuntu-latest
     permissions:
-      # Job-level permissions replace the top-level block rather than adding to
-      # it, so contents has to be restated for checkout.
       contents: read
       id-token: write
     steps:
