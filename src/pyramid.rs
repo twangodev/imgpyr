@@ -1,4 +1,4 @@
-use crate::ops::fill_rows;
+use crate::strips::fill_rows;
 use crate::{Border, Plane, expand, reduce};
 
 /// A plane and its successive halvings.
