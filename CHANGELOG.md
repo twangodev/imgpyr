@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/twangodev/imgpyr/compare/v0.1.0...v0.2.0) (2026-07-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* LaplacianPyramid::collapse no longer takes a Border.
+
+### Features
+
+* collapse uses the border the pyramid was built with ([6f5dc2f](https://github.com/twangodev/imgpyr/commit/6f5dc2f7e993f6cb137efe02bc094021e4a8b8db))
+
+
+### Bug Fixes
+
+* send a user agent when checking crates.io for the version ([37226a4](https://github.com/twangodev/imgpyr/commit/37226a42b3cebf33e8d66f63d9bc45bc7f8e65ef))
+
 ## 0.1.0 (2026-07-29)
 
 
