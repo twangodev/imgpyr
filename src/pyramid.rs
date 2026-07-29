@@ -1,3 +1,4 @@
+use crate::ops::fill_rows;
 use crate::{Border, Plane, expand, reduce};
 
 /// A plane and its successive halvings.
@@ -10,11 +11,7 @@ impl GaussianPyramid {
     pub fn build(src: &Plane, levels: usize, border: Border) -> Self {
         let mut planes = Vec::with_capacity(levels + 1);
         planes.push(src.clone());
-
-        for _ in 0..levels {
-            let coarser = reduce(planes.last().expect("just pushed"), border);
-            planes.push(coarser);
-        }
+        planes.extend(reductions(src, levels, border));
 
         Self { levels: planes }
     }
@@ -42,24 +39,20 @@ pub struct LaplacianPyramid {
 
 impl LaplacianPyramid {
     pub fn build(src: &Plane, levels: usize, border: Border) -> Self {
-        let gaussian = GaussianPyramid::build(src, levels, border);
+        let mut reduced = reductions(src, levels, border);
 
         let bands = (0..levels)
             .map(|index| {
-                let finer = gaussian.level(index);
-                let blurred = expand(
-                    gaussian.level(index + 1),
-                    finer.width(),
-                    finer.height(),
-                    border,
-                );
-                combine(finer, &blurred, |detailed, blurred| detailed - blurred)
+                let finer = if index == 0 { src } else { &reduced[index - 1] };
+                let mut blurred = expand(&reduced[index], finer.width(), finer.height(), border);
+                combine_into(finer, &mut blurred, |detailed, blurred| detailed - blurred);
+                blurred
             })
             .collect();
 
         Self {
             bands,
-            residual: gaussian.level(levels).clone(),
+            residual: reduced.pop().unwrap_or_else(|| src.clone()),
             border,
         }
     }
@@ -92,21 +85,34 @@ impl LaplacianPyramid {
             .iter()
             .rev()
             .fold(self.residual.clone(), |coarser, band| {
-                let blurred = expand(&coarser, band.width(), band.height(), border);
-                combine(band, &blurred, |detail, blurred| detail + blurred)
+                let mut blurred = expand(&coarser, band.width(), band.height(), border);
+                combine_into(band, &mut blurred, |detail, blurred| detail + blurred);
+                blurred
             })
     }
 }
 
-fn combine(left: &Plane, right: &Plane, op: impl Fn(f32, f32) -> f32) -> Plane {
-    let samples = left
-        .as_slice()
-        .iter()
-        .zip(right.as_slice())
-        .map(|(&l, &r)| op(l, r))
-        .collect();
+fn reductions(src: &Plane, levels: usize, border: Border) -> Vec<Plane> {
+    let mut planes: Vec<Plane> = Vec::with_capacity(levels);
 
-    Plane::from_vec(samples, left.width(), left.height())
+    for _ in 0..levels {
+        let coarser = reduce(planes.last().unwrap_or(src), border);
+        planes.push(coarser);
+    }
+
+    planes
+}
+
+fn combine_into(band: &Plane, blurred: &mut Plane, op: impl Fn(f32, f32) -> f32 + Send + Sync) {
+    let width = blurred.width();
+    let band_samples = band.as_slice();
+
+    fill_rows(blurred.as_mut_slice(), width, |y, row| {
+        let source = &band_samples[y * width..(y + 1) * width];
+        for (sample, &value) in row.iter_mut().zip(source) {
+            *sample = op(value, *sample);
+        }
+    });
 }
 
 #[cfg(test)]

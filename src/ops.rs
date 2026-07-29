@@ -80,92 +80,232 @@ fn interior<T: Taps>(count: usize, len: usize) -> Range<usize> {
     start..end
 }
 
-fn interior_sample<T: Taps>(src: &[f32], stride: usize, destination: usize) -> f32 {
+fn interior_sample<T: Taps>(src: &[f32], destination: usize) -> f32 {
     let mut total = 0.0;
 
     for (tap, &weight) in KERNEL.iter().enumerate() {
         let coordinate = T::coordinate(destination, tap);
         if T::contributes(coordinate) {
-            total += weight * src[T::index(coordinate as usize) * stride];
+            total += weight * src[T::index(coordinate as usize)];
         }
     }
 
     total * T::GAIN / KERNEL_SUM
 }
 
-fn bordered_sample<T: Taps>(
-    src: &[f32],
-    stride: usize,
-    len: usize,
-    destination: usize,
-    border: Border,
-) -> f32 {
+fn bordered_sample<T: Taps>(src: &[f32], len: usize, destination: usize, border: Border) -> f32 {
     let mut total = 0.0;
 
     for (tap, &weight) in KERNEL.iter().enumerate() {
         let coordinate = T::coordinate(destination, tap);
         if T::contributes(coordinate) {
             let resolved = border.resolve(coordinate, T::extent(len));
-            total += weight * src[T::index(resolved) * stride];
+            total += weight * src[T::index(resolved)];
         }
     }
 
     total * T::GAIN / KERNEL_SUM
 }
 
-fn across<T: Taps>(
+fn filter_row<T: Taps>(
+    source: &[f32],
+    src_width: usize,
+    span: &Range<usize>,
+    border: Border,
+    row: &mut [f32],
+) {
+    for (x, sample) in row[..span.start].iter_mut().enumerate() {
+        *sample = bordered_sample::<T>(source, src_width, x, border);
+    }
+    for (offset, sample) in row[span.clone()].iter_mut().enumerate() {
+        *sample = interior_sample::<T>(source, span.start + offset);
+    }
+    for (offset, sample) in row[span.end..].iter_mut().enumerate() {
+        *sample = bordered_sample::<T>(source, src_width, span.end + offset, border);
+    }
+}
+
+/// A rolling window of horizontally filtered rows, keyed by source row so the
+/// vertical pass never touches a full-plane intermediate.
+struct FilteredRows {
+    samples: Vec<f32>,
+    width: usize,
+    holds: [Option<usize>; KERNEL.len()],
+}
+
+impl FilteredRows {
+    fn new(width: usize) -> Self {
+        Self {
+            samples: vec![0.0; KERNEL.len() * width],
+            width,
+            holds: [None; KERNEL.len()],
+        }
+    }
+
+    fn fetch<T: Taps>(
+        &mut self,
+        source_row: usize,
+        src: &[f32],
+        src_width: usize,
+        span: &Range<usize>,
+        border: Border,
+    ) {
+        let slot = source_row % KERNEL.len();
+        if self.holds[slot] != Some(source_row) {
+            let source = &src[source_row * src_width..(source_row + 1) * src_width];
+            let row = &mut self.samples[slot * self.width..(slot + 1) * self.width];
+            filter_row::<T>(source, src_width, span, border, row);
+            self.holds[slot] = Some(source_row);
+        }
+    }
+
+    fn row(&self, source_row: usize) -> &[f32] {
+        let slot = source_row % KERNEL.len();
+        &self.samples[slot * self.width..(slot + 1) * self.width]
+    }
+}
+
+fn blend_rows(taps: &[(f32, &[f32])], gain: f32, destination: &mut [f32]) {
+    let width = destination.len();
+
+    match *taps {
+        [(w0, r0), (w1, r1)] => {
+            let (r0, r1) = (&r0[..width], &r1[..width]);
+            for (x, sample) in destination.iter_mut().enumerate() {
+                let mut total = 0.0;
+                total += w0 * r0[x];
+                total += w1 * r1[x];
+                *sample = total * gain / KERNEL_SUM;
+            }
+        }
+        [(w0, r0), (w1, r1), (w2, r2)] => {
+            let (r0, r1, r2) = (&r0[..width], &r1[..width], &r2[..width]);
+            for (x, sample) in destination.iter_mut().enumerate() {
+                let mut total = 0.0;
+                total += w0 * r0[x];
+                total += w1 * r1[x];
+                total += w2 * r2[x];
+                *sample = total * gain / KERNEL_SUM;
+            }
+        }
+        [(w0, r0), (w1, r1), (w2, r2), (w3, r3), (w4, r4)] => {
+            let (r0, r1, r2, r3, r4) = (
+                &r0[..width],
+                &r1[..width],
+                &r2[..width],
+                &r3[..width],
+                &r4[..width],
+            );
+            for (x, sample) in destination.iter_mut().enumerate() {
+                let mut total = 0.0;
+                total += w0 * r0[x];
+                total += w1 * r1[x];
+                total += w2 * r2[x];
+                total += w3 * r3[x];
+                total += w4 * r4[x];
+                *sample = total * gain / KERNEL_SUM;
+            }
+        }
+        _ => {
+            for (x, sample) in destination.iter_mut().enumerate() {
+                let mut total = 0.0;
+                for &(weight, row) in taps {
+                    total += weight * row[x];
+                }
+                *sample = total * gain / KERNEL_SUM;
+            }
+        }
+    }
+}
+
+fn resample<T: Taps>(
     src: &[f32],
     src_width: usize,
-    height: usize,
+    src_height: usize,
     width: usize,
+    height: usize,
     border: Border,
 ) -> Vec<f32> {
     let mut resampled = vec![0.0; width * height];
     let span = interior::<T>(width, src_width);
+    let extent = T::extent(src_height);
 
-    fill_rows(&mut resampled, width, |y, row| {
-        let source = &src[y * src_width..(y + 1) * src_width];
+    fill_row_strips(
+        &mut resampled,
+        width,
+        rows_per_strip(height),
+        |top, strip| {
+            let mut window = FilteredRows::new(width);
 
-        for (x, sample) in row[..span.start].iter_mut().enumerate() {
-            *sample = bordered_sample::<T>(source, 1, src_width, x, border);
-        }
-        for (offset, sample) in row[span.clone()].iter_mut().enumerate() {
-            *sample = interior_sample::<T>(source, 1, span.start + offset);
-        }
-        for (offset, sample) in row[span.end..].iter_mut().enumerate() {
-            *sample = bordered_sample::<T>(source, 1, src_width, span.end + offset, border);
-        }
-    });
+            for (offset, destination) in strip.chunks_mut(width).enumerate() {
+                let y = top + offset;
+
+                let mut contributing = [(0.0, 0usize); KERNEL.len()];
+                let mut count = 0;
+                for (tap, &weight) in KERNEL.iter().enumerate() {
+                    let coordinate = T::coordinate(y, tap);
+                    if T::contributes(coordinate) {
+                        let source_row = T::index(border.resolve(coordinate, extent));
+                        window.fetch::<T>(source_row, src, src_width, &span, border);
+                        contributing[count] = (weight, source_row);
+                        count += 1;
+                    }
+                }
+
+                let mut taps = [(0.0, [].as_slice()); KERNEL.len()];
+                for (tap, &(weight, source_row)) in contributing[..count].iter().enumerate() {
+                    taps[tap] = (weight, window.row(source_row));
+                }
+
+                blend_rows(&taps[..count], T::GAIN, destination);
+            }
+        },
+    );
 
     resampled
 }
 
-fn down<T: Taps>(
-    src: &[f32],
+/// Splitting each thread's share four ways trades a little halo refiltering
+/// for resilience to uneven scheduling.
+#[cfg(feature = "rayon")]
+fn rows_per_strip(height: usize) -> usize {
+    height
+        .div_ceil(4 * rayon::current_num_threads())
+        .max(KERNEL.len())
+}
+
+#[cfg(not(feature = "rayon"))]
+fn rows_per_strip(height: usize) -> usize {
+    height.max(1)
+}
+
+fn fill_row_strips(
+    buffer: &mut [f32],
     width: usize,
-    src_height: usize,
-    height: usize,
-    border: Border,
-) -> Vec<f32> {
-    let mut resampled = vec![0.0; width * height];
-    let span = interior::<T>(height, src_height);
+    strip_height: usize,
+    fill: impl Fn(usize, &mut [f32]) + Send + Sync,
+) {
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        buffer
+            .par_chunks_mut(strip_height * width)
+            .enumerate()
+            .for_each(|(strip, rows)| fill(strip * strip_height, rows));
+    }
 
-    fill_rows(&mut resampled, width, |y, row| {
-        if span.contains(&y) {
-            for (x, sample) in row.iter_mut().enumerate() {
-                *sample = interior_sample::<T>(&src[x..], width, y);
-            }
-        } else {
-            for (x, sample) in row.iter_mut().enumerate() {
-                *sample = bordered_sample::<T>(&src[x..], width, src_height, y, border);
-            }
-        }
-    });
-
-    resampled
+    #[cfg(not(feature = "rayon"))]
+    buffer
+        .chunks_mut(strip_height * width)
+        .enumerate()
+        .for_each(|(strip, rows)| fill(strip * strip_height, rows));
 }
 
-fn fill_rows(buffer: &mut [f32], width: usize, fill: impl Fn(usize, &mut [f32]) + Send + Sync) {
+pub(crate) fn fill_rows(
+    buffer: &mut [f32],
+    width: usize,
+    fill: impl Fn(usize, &mut [f32]) + Send + Sync,
+) {
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
@@ -187,8 +327,14 @@ pub fn reduce(src: &Plane, border: Border) -> Plane {
     let width = src.width().div_ceil(2);
     let height = src.height().div_ceil(2);
 
-    let columns = across::<Decimate>(src.as_slice(), src.width(), src.height(), width, border);
-    let samples = down::<Decimate>(&columns, width, src.height(), height, border);
+    let samples = resample::<Decimate>(
+        src.as_slice(),
+        src.width(),
+        src.height(),
+        width,
+        height,
+        border,
+    );
 
     Plane::from_vec(samples, width, height)
 }
@@ -208,8 +354,14 @@ pub fn expand(src: &Plane, width: usize, height: usize, border: Border) -> Plane
         src.height()
     );
 
-    let columns = across::<Interpolate>(src.as_slice(), src.width(), src.height(), width, border);
-    let samples = down::<Interpolate>(&columns, width, src.height(), height, border);
+    let samples = resample::<Interpolate>(
+        src.as_slice(),
+        src.width(),
+        src.height(),
+        width,
+        height,
+        border,
+    );
 
     Plane::from_vec(samples, width, height)
 }
