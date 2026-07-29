@@ -2,6 +2,8 @@
 
 Gaussian and Laplacian image pyramids.
 
+Single-channel `f32`, with odd dimensions handled correctly at every level.
+
 ```rust
 use imgpyr::{Border, LaplacianPyramid, Plane};
 
