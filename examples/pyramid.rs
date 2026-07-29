@@ -37,7 +37,7 @@ fn main() {
         );
     }
     write(laplacian.residual(), &output.join("laplacian-residual.png"));
-    write(&laplacian.collapse(BORDER), &output.join("collapsed.png"));
+    write(&laplacian.collapse(), &output.join("collapsed.png"));
 
     println!("{} levels written to {}", gaussian.len(), output.display());
 }

@@ -37,6 +37,7 @@ impl GaussianPyramid {
 pub struct LaplacianPyramid {
     bands: Vec<Plane>,
     residual: Plane,
+    border: Border,
 }
 
 impl LaplacianPyramid {
@@ -59,6 +60,7 @@ impl LaplacianPyramid {
         Self {
             bands,
             residual: gaussian.level(levels).clone(),
+            border,
         }
     }
 
@@ -82,7 +84,10 @@ impl LaplacianPyramid {
         self.bands.is_empty()
     }
 
-    pub fn collapse(&self, border: Border) -> Plane {
+    /// Reconstruction is only exact when analysis and synthesis use the same
+    /// expand, so the border is taken from `build` rather than the caller.
+    pub fn collapse(&self) -> Plane {
+        let border = self.border;
         self.bands
             .iter()
             .rev()
@@ -108,6 +113,12 @@ fn combine(left: &Plane, right: &Plane, op: impl Fn(f32, f32) -> f32) -> Plane {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Reconstruction is exact in real arithmetic. In `f32` the error comes from
+    /// cancellation in `G - E`, so it scales with the plane's peak magnitude
+    /// rather than with each sample: near-zero samples drift by the same tiny
+    /// absolute amount as large ones, which is many ulps but little signal.
+    const RECONSTRUCTION_EPSILONS: f32 = 8.0;
 
     fn plane_from(width: usize, height: usize, value: impl Fn(f32, f32) -> f32) -> Plane {
         let samples = (0..width * height)
@@ -164,8 +175,10 @@ mod tests {
     fn collapse_restores_the_source() {
         let source = plane_from(65, 49, |x, y| (x * 0.7).sin() + (y * 0.3).cos());
 
+        let peak = source.as_slice().iter().fold(0.0f32, |m, v| m.max(v.abs()));
+
         for border in [Border::Replicate, Border::Mirror] {
-            let restored = LaplacianPyramid::build(&source, 3, border).collapse(border);
+            let restored = LaplacianPyramid::build(&source, 3, border).collapse();
 
             for (i, (&actual, &expected)) in restored
                 .as_slice()
@@ -174,7 +187,7 @@ mod tests {
                 .enumerate()
             {
                 assert!(
-                    (actual - expected).abs() < 1e-5,
+                    (actual - expected).abs() <= RECONSTRUCTION_EPSILONS * f32::EPSILON * peak,
                     "{border:?} at {i}: {actual} != {expected}"
                 );
             }
@@ -230,7 +243,7 @@ mod tests {
         let mut pyramid = LaplacianPyramid::build(&source, 2, Border::Mirror);
 
         pyramid.band_mut(1).as_mut_slice()[0] += 1.0;
-        let edited = pyramid.collapse(Border::Mirror);
+        let edited = pyramid.collapse();
 
         let drift: f32 = edited
             .as_slice()
@@ -251,8 +264,7 @@ mod tests {
         ) {
             let source = plane_from(width, height, |x, y| 0.01 * x - 0.02 * y);
 
-            let restored = LaplacianPyramid::build(&source, levels, Border::Mirror)
-                .collapse(Border::Mirror);
+            let restored = LaplacianPyramid::build(&source, levels, Border::Mirror).collapse();
 
             prop_assert_eq!(restored.width(), width);
             prop_assert_eq!(restored.height(), height);

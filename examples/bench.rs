@@ -35,7 +35,7 @@ fn main() {
     let build = start.elapsed();
 
     let start = Instant::now();
-    let restored = pyramid.collapse(Border::Mirror);
+    let restored = pyramid.collapse();
     let collapse = start.elapsed();
 
     let drift = restored
