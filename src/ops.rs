@@ -12,15 +12,16 @@ const RADIUS: isize = (KERNEL.len() / 2) as isize;
 type Tap = fn(usize, usize, usize, Border) -> Option<usize>;
 
 fn decimating(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
-    Some(border.resolve(
-        2 * destination as isize + tap as isize - RADIUS,
-        len,
-    ))
+    Some(border.resolve(2 * destination as isize + tap as isize - RADIUS, len))
 }
 
+/// Edges are resolved against the upsampled grid rather than the source, which
+/// is what OpenCV does and is not the same thing: the mirror axis at the far end
+/// falls on an inserted zero, so reflection there lands back on the last real
+/// sample instead of the one before it.
 fn interpolating(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
     let coordinate = destination as isize + tap as isize - RADIUS;
-    (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate.div_euclid(2), len))
+    (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate, 2 * len) / 2)
 }
 
 /// The kernel is an outer product, so a 2D pass factors into one pass per axis:
@@ -202,9 +203,14 @@ mod tests {
     }
 
     /// `None` where the tap falls on an inserted zero.
-    fn reference_upsampled_source(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
+    fn reference_upsampled_source(
+        destination: usize,
+        tap: usize,
+        len: usize,
+        border: Border,
+    ) -> Option<usize> {
         let coordinate = destination as isize + tap as isize - RADIUS;
-        (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate.div_euclid(2), len))
+        (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate, 2 * len) / 2)
     }
 
     fn reference_reduce_at(src: &Plane, cx: usize, cy: usize, border: Border) -> f32 {
@@ -232,7 +238,7 @@ mod tests {
     }
 
     /// A constant is shift-invariant, so this cannot see a decimation-phase
-    /// error — that is what the ramp is for.
+    /// error. That is what the ramp is for.
     #[test]
     fn a_constant_plane_survives_reduction() {
         for border in BORDERS {
