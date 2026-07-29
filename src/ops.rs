@@ -12,6 +12,10 @@ const RADIUS: isize = (KERNEL.len() / 2) as isize;
 trait Taps {
     const GAIN: f32;
 
+    /// Both passes leave their sums unnormalised, so this folds the kernel
+    /// normalisation for each of them into one multiply.
+    const SCALE: f32 = Self::GAIN * Self::GAIN / (KERNEL_SUM * KERNEL_SUM);
+
     fn coordinate(destination: usize, tap: usize) -> isize;
 
     fn extent(len: usize) -> usize;
@@ -19,6 +23,10 @@ trait Taps {
     fn contributes(coordinate: isize) -> bool;
 
     fn index(coordinate: usize) -> usize;
+
+    /// Unnormalised, and branch-free so the compiler can vectorise it. The
+    /// per-tap `contributes` test is what otherwise blocks that.
+    fn fill_interior(src: &[f32], span: Range<usize>, row: &mut [f32]);
 }
 
 struct Decimate;
@@ -40,6 +48,17 @@ impl Taps for Decimate {
 
     fn index(coordinate: usize) -> usize {
         coordinate
+    }
+
+    fn fill_interior(src: &[f32], span: Range<usize>, row: &mut [f32]) {
+        for (offset, sample) in row[span.clone()].iter_mut().enumerate() {
+            let base = 2 * (span.start + offset) - RADIUS as usize;
+            *sample = KERNEL[0] * src[base]
+                + KERNEL[1] * src[base + 1]
+                + KERNEL[2] * src[base + 2]
+                + KERNEL[3] * src[base + 3]
+                + KERNEL[4] * src[base + 4];
+        }
     }
 }
 
@@ -65,6 +84,18 @@ impl Taps for Interpolate {
     fn index(coordinate: usize) -> usize {
         coordinate / 2
     }
+
+    fn fill_interior(src: &[f32], span: Range<usize>, row: &mut [f32]) {
+        for (offset, sample) in row[span.clone()].iter_mut().enumerate() {
+            let destination = span.start + offset;
+            let source = destination / 2;
+            *sample = if destination.is_multiple_of(2) {
+                KERNEL[0] * src[source - 1] + KERNEL[2] * src[source] + KERNEL[4] * src[source + 1]
+            } else {
+                KERNEL[1] * src[source] + KERNEL[3] * src[source + 1]
+            };
+        }
+    }
 }
 
 /// Border resolution costs an integer division per tap, so the hot path avoids it.
@@ -80,19 +111,6 @@ fn interior<T: Taps>(count: usize, len: usize) -> Range<usize> {
     start..end
 }
 
-fn interior_sample<T: Taps>(src: &[f32], destination: usize) -> f32 {
-    let mut total = 0.0;
-
-    for (tap, &weight) in KERNEL.iter().enumerate() {
-        let coordinate = T::coordinate(destination, tap);
-        if T::contributes(coordinate) {
-            total += weight * src[T::index(coordinate as usize)];
-        }
-    }
-
-    total * T::GAIN / KERNEL_SUM
-}
-
 fn bordered_sample<T: Taps>(src: &[f32], len: usize, destination: usize, border: Border) -> f32 {
     let mut total = 0.0;
 
@@ -104,7 +122,7 @@ fn bordered_sample<T: Taps>(src: &[f32], len: usize, destination: usize, border:
         }
     }
 
-    total * T::GAIN / KERNEL_SUM
+    total
 }
 
 fn filter_row<T: Taps>(
@@ -117,9 +135,7 @@ fn filter_row<T: Taps>(
     for (x, sample) in row[..span.start].iter_mut().enumerate() {
         *sample = bordered_sample::<T>(source, src_width, x, border);
     }
-    for (offset, sample) in row[span.clone()].iter_mut().enumerate() {
-        *sample = interior_sample::<T>(source, span.start + offset);
-    }
+    T::fill_interior(source, span.clone(), row);
     for (offset, sample) in row[span.end..].iter_mut().enumerate() {
         *sample = bordered_sample::<T>(source, src_width, span.end + offset, border);
     }
@@ -165,7 +181,7 @@ impl FilteredRows {
     }
 }
 
-fn blend_rows(taps: &[(f32, &[f32])], gain: f32, destination: &mut [f32]) {
+fn blend_rows(taps: &[(f32, &[f32])], scale: f32, destination: &mut [f32]) {
     let width = destination.len();
 
     match *taps {
@@ -175,7 +191,7 @@ fn blend_rows(taps: &[(f32, &[f32])], gain: f32, destination: &mut [f32]) {
                 let mut total = 0.0;
                 total += w0 * r0[x];
                 total += w1 * r1[x];
-                *sample = total * gain / KERNEL_SUM;
+                *sample = total * scale;
             }
         }
         [(w0, r0), (w1, r1), (w2, r2)] => {
@@ -185,7 +201,7 @@ fn blend_rows(taps: &[(f32, &[f32])], gain: f32, destination: &mut [f32]) {
                 total += w0 * r0[x];
                 total += w1 * r1[x];
                 total += w2 * r2[x];
-                *sample = total * gain / KERNEL_SUM;
+                *sample = total * scale;
             }
         }
         [(w0, r0), (w1, r1), (w2, r2), (w3, r3), (w4, r4)] => {
@@ -203,7 +219,7 @@ fn blend_rows(taps: &[(f32, &[f32])], gain: f32, destination: &mut [f32]) {
                 total += w2 * r2[x];
                 total += w3 * r3[x];
                 total += w4 * r4[x];
-                *sample = total * gain / KERNEL_SUM;
+                *sample = total * scale;
             }
         }
         _ => {
@@ -212,7 +228,7 @@ fn blend_rows(taps: &[(f32, &[f32])], gain: f32, destination: &mut [f32]) {
                 for &(weight, row) in taps {
                     total += weight * row[x];
                 }
-                *sample = total * gain / KERNEL_SUM;
+                *sample = total * scale;
             }
         }
     }
@@ -257,7 +273,7 @@ fn resample<T: Taps>(
                     taps[tap] = (weight, window.row(source_row));
                 }
 
-                blend_rows(&taps[..count], T::GAIN, destination);
+                blend_rows(&taps[..count], T::SCALE, destination);
             }
         },
     );
