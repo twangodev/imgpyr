@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Gaussian and Laplacian image pyramids"
+repository = "https://github.com/twangodev/imgpyr"
 readme = "README.md"
 keywords = ["image", "pyramid", "laplacian", "gaussian", "blending"]
 categories = ["multimedia::images"]
