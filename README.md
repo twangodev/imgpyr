@@ -1,5 +1,10 @@
 # imgpyr
 
+[![crates.io](https://img.shields.io/crates/v/imgpyr.svg)](https://crates.io/crates/imgpyr)
+[![docs.rs](https://img.shields.io/docsrs/imgpyr)](https://docs.rs/imgpyr)
+[![build](https://img.shields.io/github/actions/workflow/status/twangodev/imgpyr/rust.yml?branch=main)](https://github.com/twangodev/imgpyr/actions/workflows/rust.yml)
+[![license](https://img.shields.io/crates/l/imgpyr)](LICENSE)
+
 Gaussian and Laplacian image pyramids.
 
 Single-channel `f32`, with odd dimensions handled correctly at every level.
