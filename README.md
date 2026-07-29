@@ -33,8 +33,8 @@ Planes are single channel, so call three times for RGB.
 cargo run --example pyramid     # writes every level to target/
 ```
 
-The `rayon` feature parallelises the row passes: 4.4x on 24 cores at 51 MP.
-The work is memory bound, so more cores buy less than you would expect.
+The `rayon` feature parallelises the row passes, though throughput is mostly
+limited by memory bandwidth rather than cores.
 
 ## Acknowledgements
 
