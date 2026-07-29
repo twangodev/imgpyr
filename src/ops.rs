@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::{Border, Plane};
 
 /// Burt & Adelson (1983) with `a = 0.375`.
@@ -7,88 +9,162 @@ const KERNEL_SUM: f32 = KERNEL[0] + KERNEL[1] + KERNEL[2] + KERNEL[3] + KERNEL[4
 
 const RADIUS: isize = (KERNEL.len() / 2) as isize;
 
-/// Which source sample a kernel tap reads, or `None` where it reads a position
-/// that only exists because upsampling invented it.
-type Tap = fn(usize, usize, usize, Border) -> Option<usize>;
+trait Taps {
+    const GAIN: f32;
 
-fn decimating(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
-    Some(border.resolve(2 * destination as isize + tap as isize - RADIUS, len))
+    fn coordinate(destination: usize, tap: usize) -> isize;
+
+    fn extent(len: usize) -> usize;
+
+    fn contributes(coordinate: isize) -> bool;
+
+    fn index(coordinate: usize) -> usize;
 }
 
-/// Edges are resolved against the upsampled grid rather than the source, which
-/// is what OpenCV does and is not the same thing: the mirror axis at the far end
-/// falls on an inserted zero, so reflection there lands back on the last real
-/// sample instead of the one before it.
-fn interpolating(destination: usize, tap: usize, len: usize, border: Border) -> Option<usize> {
-    let coordinate = destination as isize + tap as isize - RADIUS;
-    (coordinate.rem_euclid(2) == 0).then(|| border.resolve(coordinate, 2 * len) / 2)
+struct Decimate;
+
+impl Taps for Decimate {
+    const GAIN: f32 = 1.0;
+
+    fn coordinate(destination: usize, tap: usize) -> isize {
+        2 * destination as isize + tap as isize - RADIUS
+    }
+
+    fn extent(len: usize) -> usize {
+        len
+    }
+
+    fn contributes(_: isize) -> bool {
+        true
+    }
+
+    fn index(coordinate: usize) -> usize {
+        coordinate
+    }
 }
 
-/// The kernel is an outer product, so a 2D pass factors into one pass per axis:
-/// 10 multiplies per sample instead of 25.
-fn weighted(
-    samples: &[f32],
+struct Interpolate;
+
+impl Taps for Interpolate {
+    const GAIN: f32 = 2.0;
+
+    fn coordinate(destination: usize, tap: usize) -> isize {
+        destination as isize + tap as isize - RADIUS
+    }
+
+    /// The far mirror axis sits on an inserted zero, so reflection there returns
+    /// the last real sample rather than the one before it. OpenCV does the same.
+    fn extent(len: usize) -> usize {
+        2 * len
+    }
+
+    fn contributes(coordinate: isize) -> bool {
+        coordinate.rem_euclid(2) == 0
+    }
+
+    fn index(coordinate: usize) -> usize {
+        coordinate / 2
+    }
+}
+
+/// Border resolution costs an integer division per tap, so the hot path avoids it.
+fn interior<T: Taps>(count: usize, len: usize) -> Range<usize> {
+    let extent = T::extent(len) as isize;
+    let inside = |destination: usize| {
+        T::coordinate(destination, 0) >= 0 && T::coordinate(destination, KERNEL.len() - 1) < extent
+    };
+
+    let start = (0..count).find(|&d| inside(d)).unwrap_or(count);
+    let end = (start..count).find(|&d| !inside(d)).unwrap_or(count);
+
+    start..end
+}
+
+fn interior_sample<T: Taps>(src: &[f32], stride: usize, destination: usize) -> f32 {
+    let mut total = 0.0;
+
+    for (tap, &weight) in KERNEL.iter().enumerate() {
+        let coordinate = T::coordinate(destination, tap);
+        if T::contributes(coordinate) {
+            total += weight * src[T::index(coordinate as usize) * stride];
+        }
+    }
+
+    total * T::GAIN / KERNEL_SUM
+}
+
+fn bordered_sample<T: Taps>(
+    src: &[f32],
     stride: usize,
     len: usize,
     destination: usize,
-    tap: Tap,
-    gain: f32,
     border: Border,
 ) -> f32 {
     let mut total = 0.0;
 
-    for (index, &weight) in KERNEL.iter().enumerate() {
-        if let Some(source) = tap(destination, index, len, border) {
-            total += weight * samples[source * stride];
+    for (tap, &weight) in KERNEL.iter().enumerate() {
+        let coordinate = T::coordinate(destination, tap);
+        if T::contributes(coordinate) {
+            let resolved = border.resolve(coordinate, T::extent(len));
+            total += weight * src[T::index(resolved) * stride];
         }
     }
 
-    total * gain / KERNEL_SUM
+    total * T::GAIN / KERNEL_SUM
 }
 
-fn across(
+fn across<T: Taps>(
     src: &[f32],
     src_width: usize,
     height: usize,
     width: usize,
-    tap: Tap,
-    gain: f32,
     border: Border,
 ) -> Vec<f32> {
     let mut resampled = vec![0.0; width * height];
+    let span = interior::<T>(width, src_width);
 
     fill_rows(&mut resampled, width, |y, row| {
         let source = &src[y * src_width..(y + 1) * src_width];
-        for (x, sample) in row.iter_mut().enumerate() {
-            *sample = weighted(source, 1, src_width, x, tap, gain, border);
+
+        for (x, sample) in row[..span.start].iter_mut().enumerate() {
+            *sample = bordered_sample::<T>(source, 1, src_width, x, border);
+        }
+        for (offset, sample) in row[span.clone()].iter_mut().enumerate() {
+            *sample = interior_sample::<T>(source, 1, span.start + offset);
+        }
+        for (offset, sample) in row[span.end..].iter_mut().enumerate() {
+            *sample = bordered_sample::<T>(source, 1, src_width, span.end + offset, border);
         }
     });
 
     resampled
 }
 
-fn down(
+fn down<T: Taps>(
     src: &[f32],
     width: usize,
     src_height: usize,
     height: usize,
-    tap: Tap,
-    gain: f32,
     border: Border,
 ) -> Vec<f32> {
     let mut resampled = vec![0.0; width * height];
+    let span = interior::<T>(height, src_height);
 
     fill_rows(&mut resampled, width, |y, row| {
-        for (x, sample) in row.iter_mut().enumerate() {
-            *sample = weighted(&src[x..], width, src_height, y, tap, gain, border);
+        if span.contains(&y) {
+            for (x, sample) in row.iter_mut().enumerate() {
+                *sample = interior_sample::<T>(&src[x..], width, y);
+            }
+        } else {
+            for (x, sample) in row.iter_mut().enumerate() {
+                *sample = bordered_sample::<T>(&src[x..], width, src_height, y, border);
+            }
         }
     });
 
     resampled
 }
 
-/// Every output row is independent of the others, which is the whole reason
-/// `rayon` can be dropped in without touching the arithmetic.
 fn fill_rows(buffer: &mut [f32], width: usize, fill: impl Fn(usize, &mut [f32]) + Send + Sync) {
     #[cfg(feature = "rayon")]
     {
@@ -108,28 +184,11 @@ fn fill_rows(buffer: &mut [f32], width: usize, fill: impl Fn(usize, &mut [f32]) 
 
 /// Blurs and halves a plane, rounding each dimension up.
 pub fn reduce(src: &Plane, border: Border) -> Plane {
-    const GAIN: f32 = 1.0;
     let width = src.width().div_ceil(2);
     let height = src.height().div_ceil(2);
 
-    let columns = across(
-        src.as_slice(),
-        src.width(),
-        src.height(),
-        width,
-        decimating,
-        GAIN,
-        border,
-    );
-    let samples = down(
-        &columns,
-        width,
-        src.height(),
-        height,
-        decimating,
-        GAIN,
-        border,
-    );
+    let columns = across::<Decimate>(src.as_slice(), src.width(), src.height(), width, border);
+    let samples = down::<Decimate>(&columns, width, src.height(), height, border);
 
     Plane::from_vec(samples, width, height)
 }
@@ -149,26 +208,8 @@ pub fn expand(src: &Plane, width: usize, height: usize, border: Border) -> Plane
         src.height()
     );
 
-    const GAIN: f32 = 2.0;
-
-    let columns = across(
-        src.as_slice(),
-        src.width(),
-        src.height(),
-        width,
-        interpolating,
-        GAIN,
-        border,
-    );
-    let samples = down(
-        &columns,
-        width,
-        src.height(),
-        height,
-        interpolating,
-        GAIN,
-        border,
-    );
+    let columns = across::<Interpolate>(src.as_slice(), src.width(), src.height(), width, border);
+    let samples = down::<Interpolate>(&columns, width, src.height(), height, border);
 
     Plane::from_vec(samples, width, height)
 }
