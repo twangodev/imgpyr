@@ -23,7 +23,9 @@ fn main() {
 
     let megapixels = (width * height) as f64 / 1e6;
     let source = Plane::from_vec(
-        (0..width * height).map(|i| (i % 251) as f32 / 251.0).collect(),
+        (0..width * height)
+            .map(|i| (i % 251) as f32 / 251.0)
+            .collect(),
         width,
         height,
     );

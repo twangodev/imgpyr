@@ -121,10 +121,22 @@ mod tests {
         let pyramid = GaussianPyramid::build(&Plane::zeros(65, 49), 3, Border::Mirror);
 
         assert_eq!(pyramid.len(), 4);
-        assert_eq!((pyramid.level(0).width(), pyramid.level(0).height()), (65, 49));
-        assert_eq!((pyramid.level(1).width(), pyramid.level(1).height()), (33, 25));
-        assert_eq!((pyramid.level(2).width(), pyramid.level(2).height()), (17, 13));
-        assert_eq!((pyramid.level(3).width(), pyramid.level(3).height()), (9, 7));
+        assert_eq!(
+            (pyramid.level(0).width(), pyramid.level(0).height()),
+            (65, 49)
+        );
+        assert_eq!(
+            (pyramid.level(1).width(), pyramid.level(1).height()),
+            (33, 25)
+        );
+        assert_eq!(
+            (pyramid.level(2).width(), pyramid.level(2).height()),
+            (17, 13)
+        );
+        assert_eq!(
+            (pyramid.level(3).width(), pyramid.level(3).height()),
+            (9, 7)
+        );
     }
 
     #[test]
@@ -132,8 +144,14 @@ mod tests {
         let pyramid = LaplacianPyramid::build(&Plane::zeros(65, 49), 2, Border::Mirror);
 
         assert_eq!(pyramid.len(), 2);
-        assert_eq!((pyramid.band(0).width(), pyramid.band(0).height()), (65, 49));
-        assert_eq!((pyramid.band(1).width(), pyramid.band(1).height()), (33, 25));
+        assert_eq!(
+            (pyramid.band(0).width(), pyramid.band(0).height()),
+            (65, 49)
+        );
+        assert_eq!(
+            (pyramid.band(1).width(), pyramid.band(1).height()),
+            (33, 25)
+        );
         assert_eq!(
             (pyramid.residual().width(), pyramid.residual().height()),
             (17, 13)
@@ -141,7 +159,7 @@ mod tests {
     }
 
     /// The expand terms cancel algebraically, so this proves little beyond the
-    /// size bookkeeping — which is exactly where odd dimensions break.
+    /// size bookkeeping, which is exactly where odd dimensions break.
     #[test]
     fn collapse_restores_the_source() {
         let source = plane_from(65, 49, |x, y| (x * 0.7).sin() + (y * 0.3).cos());
@@ -180,7 +198,7 @@ mod tests {
     }
 
     /// The 5-tap kernel reproduces affine signals exactly, so a ramp is also
-    /// pure residual — but only away from the edges, where neither border mode
+    /// pure residual, but only away from the edges, where neither border mode
     /// extends a ramp as a ramp.
     #[test]
     fn a_ramp_leaves_every_band_empty_away_from_the_edges() {

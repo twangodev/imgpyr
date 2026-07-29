@@ -3,7 +3,7 @@
 pub enum Border {
     /// `aaa|abcde|eee`
     Replicate,
-    /// `dcb|abcde|dcb` — reflect-101, the only mode OpenCV's `pyrUp` accepts.
+    /// `dcb|abcde|dcb`, reflect-101. The only mode OpenCV's `pyrUp` accepts.
     Mirror,
 }
 
@@ -18,7 +18,11 @@ impl Border {
             Border::Replicate => coord.clamp(0, last) as usize,
             Border::Mirror => {
                 let folded = coord.rem_euclid(2 * last);
-                (if folded > last { 2 * last - folded } else { folded }) as usize
+                (if folded > last {
+                    2 * last - folded
+                } else {
+                    folded
+                }) as usize
             }
         }
     }

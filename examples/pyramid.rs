@@ -23,7 +23,10 @@ fn main() {
 
     let gaussian = GaussianPyramid::build(&plane, LEVELS, BORDER);
     for index in 0..gaussian.len() {
-        write(gaussian.level(index), &output.join(format!("gaussian-{index}.png")));
+        write(
+            gaussian.level(index),
+            &output.join(format!("gaussian-{index}.png")),
+        );
     }
 
     let laplacian = LaplacianPyramid::build(&plane, LEVELS, BORDER);
