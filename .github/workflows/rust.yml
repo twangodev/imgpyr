@@ -1,0 +1,52 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo doc --no-deps
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "rayon"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Both code paths get the same suite; the rayon feature changes how the
+      # row loops run, not what they compute.
+      - run: cargo test --features "${{ matrix.features }}"
+      - run: cargo build --examples --features "${{ matrix.features }}"
+
+  fixtures:
+    # The oracle fixtures are committed, so nothing above needs OpenCV. This
+    # job proves they still match what OpenCV actually produces.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - run: uv run --with opencv-python-headless --with numpy tests/fixtures/generate.py
+      - name: Fixtures match regenerated output
+        run: git diff --exit-code tests/fixtures/opencv.txt
