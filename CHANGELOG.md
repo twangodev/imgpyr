@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.1](https://github.com/twangodev/imgpyr/compare/v0.2.0...v0.2.1) (2026-07-30)
+
+
+### Performance Improvements
+
+* hoist the interior kernel and normalise once ([98aae00](https://github.com/twangodev/imgpyr/commit/98aae00c83fb57d8ce22c0e73672bfe99c7e55a6))
+* keep border resolution out of the inner loop ([f19bdfb](https://github.com/twangodev/imgpyr/commit/f19bdfb0834d1345406aba40489a8bc201d4ff64))
+* stream the separable passes through a row window ([0c17dc8](https://github.com/twangodev/imgpyr/commit/0c17dc8a75c5d2ee8651807d1ea0c6b53d956d09))
+
 ## [0.2.0](https://github.com/twangodev/imgpyr/compare/v0.1.0...v0.2.0) (2026-07-29)
 
 
